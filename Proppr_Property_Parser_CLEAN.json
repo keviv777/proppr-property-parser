@@ -1,0 +1,915 @@
+{
+  "name": "Proppr Property Parser \u2014 Production",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "node-trigger",
+      "name": "Start Parser",
+      "position": [
+        192,
+        320
+      ],
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "documentId": {
+          "mode": "id",
+          "value": "1hStvACrQday7WRtGdztqVsb2WtWD0e0ZSZm5H77EM_g"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Raw Messages"
+        },
+        "options": {}
+      },
+      "id": "node-read",
+      "name": "Read Raw Messages",
+      "position": [
+        432,
+        320
+      ],
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "credentials": {
+        "googleApi": {
+          "id": "xWTIkcI6ybQEPBWQ",
+          "name": "Google Sheets account 4"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Filter out non-property messages, clean data, generate MSG-IDs\nconst skipKeywords = [\n  'hiring', 'job', 'salary', 'incentive', 'offer',\n  'promotion', 'gemini', 'storage', 'credits'\n];\n\n// Data cleaning function \u2014 remove emojis, symbols, normalize spacing\nfunction cleanText(text) {\n  if (!text) return '';\n  let cleaned = String(text);\n  // Remove emojis and special unicode symbols\n  cleaned = cleaned.replace(/[\\u{1F600}-\\u{1F64F}\\u{1F300}-\\u{1F5FF}\\u{1F680}-\\u{1F6FF}\\u{1F1E0}-\\u{1F1FF}\\u{2600}-\\u{26FF}\\u{2700}-\\u{27BF}\\u{FE00}-\\u{FE0F}\\u{1F900}-\\u{1F9FF}\\u{1FA00}-\\u{1FA6F}\\u{1FA70}-\\u{1FAFF}\\u{200D}\\u{20E3}\\u{E0020}-\\u{E007F}]/gu, '');\n  // Remove decorative symbols like *, ~, but keep hyphens and slashes\n  cleaned = cleaned.replace(/[*~#^|]/g, '');\n  // Normalize whitespace\n  cleaned = cleaned.replace(/\\s+/g, ' ').trim();\n  return cleaned;\n}\n\n// Generate unique MSG-ID\nfunction generateMsgId() {\n  return 'MSG-' + Date.now() + '-' + Math.floor(Math.random() * 1000);\n}\n\nconst results = [];\n\nfor (const item of $input.all()) {\n  const rawMessage = cleanText(item.json['Raw Message'] || '');\n  let messageId = String(item.json['Message ID'] || '').trim();\n  const status = String(item.json['Status'] || '').trim().toUpperCase();\n\n  // Skip already processed rows\n  if (status === 'DONE') continue;\n\n  // Ensure valid Message ID\n  if (!messageId || messageId === '' || messageId === 'undefined' || messageId === 'null') {\n    messageId = generateMsgId();\n  }\n\n  const lowerMsg = rawMessage.toLowerCase();\n  let skipReason = '';\n\n  for (const kw of skipKeywords) {\n    if (lowerMsg.includes(kw)) {\n      skipReason = 'Contains irrelevant keyword: \"' + kw + '\"';\n      break;\n    }\n  }\n\n  if (skipReason) {\n    results.push({\n      json: {\n        messageId: messageId,\n        rawMessage: rawMessage,\n        status: 'SKIP',\n        skipReason: skipReason\n      }\n    });\n  } else {\n    results.push({\n      json: {\n        messageId: messageId,\n        rawMessage: rawMessage,\n        status: 'RELEVANT',\n        skipReason: ''\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "id": "node-filter",
+      "name": "Filter and Classify",
+      "position": [
+        672,
+        320
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-relevant",
+              "leftValue": "={{ $json.status }}",
+              "operator": {
+                "operation": "equals",
+                "type": "string"
+              },
+              "rightValue": "RELEVANT"
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        },
+        "options": {}
+      },
+      "id": "node-route",
+      "name": "Route Messages",
+      "position": [
+        912,
+        320
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3
+    },
+    {
+      "parameters": {
+        "jsCode": "// Split messages with multiple requirements into separate entries\n// Uses timestamp-based unique MSG-IDs\nfunction generateMsgId() {\n  return 'MSG-' + Date.now() + '-' + Math.floor(Math.random() * 10000);\n}\n\nconst output = [];\n\nfor (const item of $input.all()) {\n  const rawMessage = String(item.json.rawMessage || '');\n  const baseId = String(item.json.messageId || '').trim();\n\n  const lines = rawMessage.split(/[\\n\\r]+/).filter(l => l.trim().length > 0);\n\n  const requirementIndicators = [\n    /^\\d+[.)]/,\n    /^[-\u2022\u25cf\u25aa]/,\n    /^[a-z][.)]/i\n  ];\n\n  const segments = [];\n  let currentSegment = '';\n\n  for (const line of lines) {\n    const trimmed = line.trim();\n    const isNewRequirement = requirementIndicators.some(r => r.test(trimmed));\n\n    if (isNewRequirement && currentSegment.trim()) {\n      segments.push(currentSegment.trim());\n      currentSegment = trimmed;\n    } else {\n      currentSegment += (currentSegment ? '\\n' : '') + trimmed;\n    }\n  }\n  if (currentSegment.trim()) {\n    segments.push(currentSegment.trim());\n  }\n\n  if (segments.length > 1) {\n    for (let i = 0; i < segments.length; i++) {\n      output.push({\n        json: {\n          messageId: generateMsgId(),\n          originalMessageId: baseId,\n          rawMessage: segments[i],\n          status: 'RELEVANT',\n          skipReason: ''\n        }\n      });\n    }\n  } else {\n    const finalId = (baseId && baseId !== '' && baseId !== 'undefined') ? baseId : generateMsgId();\n    output.push({\n      json: {\n        messageId: finalId,\n        originalMessageId: baseId,\n        rawMessage: rawMessage,\n        status: 'RELEVANT',\n        skipReason: ''\n      }\n    });\n  }\n}\n\nreturn output;"
+      },
+      "id": "node-split",
+      "name": "Split Multi Requirements",
+      "position": [
+        1168,
+        224
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:11434/api/generate",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"model\": \"llama3\",\n  \"prompt\": \"You are a real estate data extractor. Extract structured data from this property message.\\n\\nMessage: {{ $json.rawMessage }}\\n\\nReturn ONLY this JSON, no extra text:\\n{\\n  \\\"locality_project\\\": \\\"\\\",\\n  \\\"property_type\\\": \\\"\\\",\\n  \\\"size\\\": \\\"\\\",\\n  \\\"facing_feature\\\": \\\"\\\",\\n  \\\"price_budget\\\": \\\"\\\",\\n  \\\"furnishing\\\": \\\"\\\",\\n  \\\"contact_name\\\": \\\"\\\",\\n  \\\"contact_number\\\": \\\"\\\"\\n}\\n\\nRules:\\n- Use \\\"Not Available\\\" if a field is not found in the message\\n- property_type MUST be one of: Apartment, Plot, Commercial, Builder Floor, Villa\\n- Return ONLY the JSON object, nothing else\",\n  \"stream\": false\n}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "node-ai",
+      "name": "Extract with Ollama AI",
+      "position": [
+        1408,
+        224
+      ],
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// SAFE JSON PARSING - No regex, try/catch only\n// Output: status = RELEVANT (success) or FAILED (parse error)\n// All missing values = \"Not Available\" (never \"NA\")\n// All values prefixed with ' for Google Sheets safety\n\nconst validPropertyTypes = ['Apartment', 'Plot', 'Commercial', 'Builder Floor', 'Villa'];\nconst fieldKeys = [\n  'locality_project', 'property_type', 'size',\n  'facing_feature', 'price_budget', 'furnishing',\n  'contact_name', 'contact_number'\n];\n\nfunction generateMsgId() {\n  return 'MSG-' + Date.now() + '-' + Math.floor(Math.random() * 10000);\n}\n\n// Clean value: trim, remove emojis/symbols, normalize\nfunction cleanFieldValue(val) {\n  if (val === null || val === undefined) return \"'Not Available\";\n  let s = String(val).trim();\n  // Remove emojis and decorative symbols\n  s = s.replace(/[\\u{1F600}-\\u{1F64F}\\u{1F300}-\\u{1F5FF}\\u{1F680}-\\u{1F6FF}\\u{1F1E0}-\\u{1F1FF}\\u{2600}-\\u{26FF}\\u{2700}-\\u{27BF}]/gu, '').trim();\n  s = s.replace(/[*~^|]/g, '').trim();\n  // Normalize spacing\n  s = s.replace(/\\s+/g, ' ');\n  if (s === '' || s.toUpperCase() === 'NA' || s.toUpperCase() === 'N/A' || s === 'null' || s === 'undefined') {\n    return \"'Not Available\";\n  }\n  return \"'\" + s;\n}\n\nconst results = [];\n\nfor (const item of $input.all()) {\n  // Ensure valid Message ID \u2014 never MSG-UNKNOWN\n  let messageId = String(item.json.messageId || item.json.message_id || '').trim();\n  if (!messageId || messageId === '' || messageId === 'MSG-UNKNOWN' || messageId === 'undefined') {\n    messageId = generateMsgId();\n  }\n\n  const rawMessage = String(item.json.rawMessage || '');\n  const rawResponse = String(item.json.response || '');\n  let parsed = null;\n  let parseError = false;\n\n  // Try/catch safe JSON parsing \u2014 NO regex\n  try {\n    parsed = JSON.parse(rawResponse);\n  } catch (e1) {\n    try {\n      const startIdx = rawResponse.indexOf('{');\n      const endIdx = rawResponse.lastIndexOf('}');\n      if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {\n        const jsonStr = rawResponse.substring(startIdx, endIdx + 1);\n        parsed = JSON.parse(jsonStr);\n      } else {\n        parseError = true;\n      }\n    } catch (e2) {\n      parseError = true;\n    }\n  }\n\n  if (parseError || !parsed || typeof parsed !== 'object') {\n    // AI parsing FAILED \u2014 fill all fields with fallback\n    const row = {\n      message_id: \"'\" + messageId,\n      rawMessage: rawMessage,\n      status: \"'FAILED\",\n      skip_reason: \"'AI parsing failed\",\n      _isFailed: true\n    };\n    for (const key of fieldKeys) {\n      row[key] = \"'Not Available\";\n    }\n    results.push({ json: row });\n  } else {\n    // Validate property_type\n    let propType = String(parsed.property_type || '').trim();\n    if (!validPropertyTypes.includes(propType)) {\n      propType = 'Not Available';\n    }\n\n    results.push({\n      json: {\n        message_id: \"'\" + messageId,\n        rawMessage: rawMessage,\n        locality_project: cleanFieldValue(parsed.locality_project),\n        property_type: \"'\" + propType,\n        size: cleanFieldValue(parsed.size),\n        facing_feature: cleanFieldValue(parsed.facing_feature),\n        price_budget: cleanFieldValue(parsed.price_budget),\n        furnishing: cleanFieldValue(parsed.furnishing),\n        contact_name: cleanFieldValue(parsed.contact_name),\n        contact_number: cleanFieldValue(parsed.contact_number),\n        status: \"'RELEVANT\",\n        skip_reason: \"'\",\n        _isFailed: false\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "id": "node-parse",
+      "name": "Validate and Parse AI Response",
+      "position": [
+        1648,
+        224
+      ],
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "combinator": "and",
+          "conditions": [
+            {
+              "id": "cond-success",
+              "leftValue": "={{ $json._isFailed }}",
+              "operator": {
+                "operation": "equals",
+                "type": "boolean"
+              },
+              "rightValue": false
+            }
+          ],
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          }
+        },
+        "options": {}
+      },
+      "id": "node-route-parsed",
+      "name": "Route Parsed Results",
+      "position": [
+        1888,
+        224
+      ],
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "mode": "id",
+          "value": "1hStvACrQday7WRtGdztqVsb2WtWD0e0ZSZm5H77EM_g"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Structured Output"
+        },
+        "columns": {
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true,
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "schema": [
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Message ID",
+              "id": "Message ID",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Locality/Project",
+              "id": "Locality/Project",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Property Type",
+              "id": "Property Type",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Size",
+              "id": "Size",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Facing/Feature",
+              "id": "Facing/Feature",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Price/Budget",
+              "id": "Price/Budget",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Furnishing",
+              "id": "Furnishing",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Contact Name",
+              "id": "Contact Name",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Contact Number",
+              "id": "Contact Number",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Status",
+              "id": "Status",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Skip Reason",
+              "id": "Skip Reason",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "value": {
+            "Contact Name": "={{ $json.contact_name }}",
+            "Contact Number": "={{ $json.contact_number }}",
+            "Facing/Feature": "={{ $json.facing_feature }}",
+            "Furnishing": "={{ $json.furnishing }}",
+            "Locality/Project": "={{ $json.locality_project }}",
+            "Message ID": "={{ $json.message_id }}",
+            "Price/Budget": "={{ $json.price_budget }}",
+            "Property Type": "={{ $json.property_type }}",
+            "Size": "={{ $json.size }}",
+            "Skip Reason": "={{ $json.skip_reason }}",
+            "Status": "={{ $json.status }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-write",
+      "name": "Save to Structured Output",
+      "position": [
+        2128,
+        128
+      ],
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "credentials": {
+        "googleApi": {
+          "id": "xWTIkcI6ybQEPBWQ",
+          "name": "Google Sheets account 4"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "mode": "id",
+          "value": "1hStvACrQday7WRtGdztqVsb2WtWD0e0ZSZm5H77EM_g"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Error Logs"
+        },
+        "columns": {
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true,
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "schema": [
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Message ID",
+              "id": "Message ID",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Raw Message",
+              "id": "Raw Message",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Error Reason",
+              "id": "Error Reason",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "value": {
+            "Error Reason": "={{ $json.skip_reason }}",
+            "Message ID": "={{ $json.message_id }}",
+            "Raw Message": "={{ \"'\" + ($json.rawMessage || '').substring(0, 500) }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-log-errors",
+      "name": "Log Errors",
+      "position": [
+        2128,
+        352
+      ],
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "credentials": {
+        "googleApi": {
+          "id": "xWTIkcI6ybQEPBWQ",
+          "name": "Google Sheets account 4"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "mode": "id",
+          "value": "1hStvACrQday7WRtGdztqVsb2WtWD0e0ZSZm5H77EM_g"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Structured Output"
+        },
+        "columns": {
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true,
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "schema": [
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Message ID",
+              "id": "Message ID",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Locality/Project",
+              "id": "Locality/Project",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Property Type",
+              "id": "Property Type",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Size",
+              "id": "Size",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Facing/Feature",
+              "id": "Facing/Feature",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Price/Budget",
+              "id": "Price/Budget",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Furnishing",
+              "id": "Furnishing",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Contact Name",
+              "id": "Contact Name",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Contact Number",
+              "id": "Contact Number",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Status",
+              "id": "Status",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Skip Reason",
+              "id": "Skip Reason",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "value": {
+            "Contact Name": "={{ $json.contact_name }}",
+            "Contact Number": "={{ $json.contact_number }}",
+            "Facing/Feature": "={{ $json.facing_feature }}",
+            "Furnishing": "={{ $json.furnishing }}",
+            "Locality/Project": "={{ $json.locality_project }}",
+            "Message ID": "={{ $json.message_id }}",
+            "Price/Budget": "={{ $json.price_budget }}",
+            "Property Type": "={{ $json.property_type }}",
+            "Size": "={{ $json.size }}",
+            "Skip Reason": "={{ $json.skip_reason }}",
+            "Status": "={{ $json.status }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-save-failed",
+      "name": "Save Failed to Structured Output",
+      "position": [
+        2368,
+        352
+      ],
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "credentials": {
+        "googleApi": {
+          "id": "xWTIkcI6ybQEPBWQ",
+          "name": "Google Sheets account 4"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "append",
+        "documentId": {
+          "mode": "id",
+          "value": "1hStvACrQday7WRtGdztqVsb2WtWD0e0ZSZm5H77EM_g"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Structured Output"
+        },
+        "columns": {
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true,
+          "mappingMode": "defineBelow",
+          "matchingColumns": [],
+          "schema": [
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Message ID",
+              "id": "Message ID",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Locality/Project",
+              "id": "Locality/Project",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Property Type",
+              "id": "Property Type",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Size",
+              "id": "Size",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Facing/Feature",
+              "id": "Facing/Feature",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Price/Budget",
+              "id": "Price/Budget",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Furnishing",
+              "id": "Furnishing",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Contact Name",
+              "id": "Contact Name",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Contact Number",
+              "id": "Contact Number",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Status",
+              "id": "Status",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Skip Reason",
+              "id": "Skip Reason",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "value": {
+            "Contact Name": "'Not Available",
+            "Contact Number": "'Not Available",
+            "Facing/Feature": "'Not Available",
+            "Furnishing": "'Not Available",
+            "Locality/Project": "'Not Available",
+            "Message ID": "={{ \"'\" + $json.messageId }}",
+            "Price/Budget": "'Not Available",
+            "Property Type": "'Not Available",
+            "Size": "'Not Available",
+            "Skip Reason": "={{ \"'\" + $json.skipReason }}",
+            "Status": "'SKIPPED"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-skip-write",
+      "name": "Save Skipped Messages",
+      "position": [
+        1168,
+        464
+      ],
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "credentials": {
+        "googleApi": {
+          "id": "xWTIkcI6ybQEPBWQ",
+          "name": "Google Sheets account 4"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "authentication": "serviceAccount",
+        "operation": "update",
+        "documentId": {
+          "mode": "id",
+          "value": "1hStvACrQday7WRtGdztqVsb2WtWD0e0ZSZm5H77EM_g"
+        },
+        "sheetName": {
+          "mode": "name",
+          "value": "Raw Messages"
+        },
+        "columns": {
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true,
+          "mappingMode": "defineBelow",
+          "matchingColumns": [
+            "Message ID"
+          ],
+          "schema": [
+            {
+              "canBeUsedToMatch": true,
+              "defaultMatch": true,
+              "display": true,
+              "displayName": "Message ID",
+              "id": "Message ID",
+              "required": false,
+              "type": "string"
+            },
+            {
+              "canBeUsedToMatch": false,
+              "defaultMatch": false,
+              "display": true,
+              "displayName": "Status",
+              "id": "Status",
+              "required": false,
+              "type": "string"
+            }
+          ],
+          "value": {
+            "Message ID": "={{ $json.message_id || $json.messageId }}",
+            "Status": "DONE"
+          }
+        },
+        "options": {}
+      },
+      "id": "node-mark-done",
+      "name": "Mark as Processed",
+      "position": [
+        2608,
+        320
+      ],
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "credentials": {
+        "googleApi": {
+          "id": "xWTIkcI6ybQEPBWQ",
+          "name": "Google Sheets account 4"
+        }
+      },
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Extract with Ollama AI": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Validate and Parse AI Response",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Filter and Classify": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Route Messages",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Log Errors": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Save Failed to Structured Output",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Read Raw Messages": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Filter and Classify",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Route Messages": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Split Multi Requirements",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Save Skipped Messages",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Route Parsed Results": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Save to Structured Output",
+            "type": "main"
+          }
+        ],
+        [
+          {
+            "index": 0,
+            "node": "Log Errors",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Save Failed to Structured Output": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Mark as Processed",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Save Skipped Messages": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Mark as Processed",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Save to Structured Output": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Mark as Processed",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Split Multi Requirements": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Extract with Ollama AI",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Start Parser": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Read Raw Messages",
+            "type": "main"
+          }
+        ]
+      ]
+    },
+    "Validate and Parse AI Response": {
+      "main": [
+        [
+          {
+            "index": 0,
+            "node": "Route Parsed Results",
+            "type": "main"
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "callerPolicy": "workflowsFromSameOwner",
+    "availableInMCP": false
+  },
+  "versionId": "YOUR_VERSION_ID",
+  "meta": {
+    "instanceId": "YOUR_INSTANCE_ID"
+  },
+  "id": "YOUR_WORKFLOW_ID",
+  "tags": []
+}
